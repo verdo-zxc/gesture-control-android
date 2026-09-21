@@ -18,7 +18,7 @@ android {
     buildTypes {
         release {
             isMinifyEnabled = false
-            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.txt")
         }
     }
 
@@ -39,3 +39,18 @@ dependencies {
     implementation("androidx.camera:camera-core:1.6.2")
     implementation("com.google.mediapipe:tasks-vision:0.10.26")
 }
+
+val modelFile = file("src/main/assets/hand_landmarker.task")
+val downloadHandModel by tasks.registering {
+    outputs.file(modelFile)
+    doLast {
+        if (!modelFile.exists()) {
+            modelFile.parentFile.mkdirs()
+            java.net.URL("https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task").openStream().use { input ->
+                modelFile.outputStream().use { output -> input.copyTo(output) }
+            }
+        }
+    }
+}
+
+tasks.named("preBuild") { dependsOn(downloadHandModel) }
