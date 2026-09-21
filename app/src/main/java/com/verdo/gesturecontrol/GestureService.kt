@@ -7,6 +7,9 @@ import android.app.NotificationManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.content.pm.ServiceInfo
+import android.graphics.Bitmap
+import android.graphics.Matrix
 import android.os.Build
 import android.os.SystemClock
 import androidx.camera.core.CameraSelector
@@ -37,12 +40,30 @@ class GestureService : LifecycleService() {
     private var lastActionTime = 0L
     private var stablePose = GestureClassifier.Pose.NONE
     private var stableSince = 0L
+    private var frames = 0
+    private var fpsStart = 0L
+    private var fps = 0f
 
     override fun onCreate() {
         super.onCreate()
-        startForeground(NOTIFICATION_ID, notification())
-        createLandmarker()
-        startCamera()
+        writeState(running = true, camera = "STARTING", error = "")
+        startForegroundCompat()
+        try {
+            createLandmarker()
+            startCamera()
+        } catch (t: Throwable) {
+            writeState(camera = "ERROR", error = t.message ?: t.javaClass.simpleName)
+            updateNotification("ERROR: ${t.javaClass.simpleName}")
+        }
+    }
+
+    private fun startForegroundCompat() {
+        val notification = notification("Starting camera…")
+        if (Build.VERSION.SDK_INT >= 29) {
+            startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA)
+        } else {
+            startForeground(NOTIFICATION_ID, notification)
+        }
     }
 
     private fun createLandmarker() {
@@ -51,38 +72,75 @@ class GestureService : LifecycleService() {
             .setBaseOptions(base)
             .setRunningMode(RunningMode.LIVE_STREAM)
             .setNumHands(1)
-            .setMinHandDetectionConfidence(0.65f)
-            .setMinHandPresenceConfidence(0.65f)
-            .setMinTrackingConfidence(0.65f)
+            .setMinHandDetectionConfidence(0.55f)
+            .setMinHandPresenceConfidence(0.55f)
+            .setMinTrackingConfidence(0.55f)
             .setResultListener { result, _ -> onResult(result) }
-            .setErrorListener { }
+            .setErrorListener { error ->
+                val message = error.message ?: "MediaPipe error"
+                writeState(camera = "ERROR", error = message)
+                updateNotification("MediaPipe ERROR")
+            }
             .build()
         landmarker = HandLandmarker.createFromOptions(this, options)
     }
 
     private fun startCamera() {
-        if (ActivityCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) return
+        if (ActivityCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+            writeState(camera = "NO CAMERA PERMISSION", error = "CAMERA permission missing")
+            return
+        }
         val future = ProcessCameraProvider.getInstance(this)
         future.addListener({
-            val provider = future.get()
-            val analysis = ImageAnalysis.Builder()
-                .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
-                .setTargetResolution(android.util.Size(640, 480))
-                .build()
-            analysis.setAnalyzer(cameraExecutor) { image -> analyze(image) }
-            provider.unbindAll()
-            provider.bindToLifecycle(this, CameraSelector.DEFAULT_FRONT_CAMERA, analysis)
+            try {
+                val provider = future.get()
+                val analysis = ImageAnalysis.Builder()
+                    .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                    .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
+                    .setTargetResolution(android.util.Size(640, 480))
+                    .build()
+                analysis.setAnalyzer(cameraExecutor) { image -> analyze(image) }
+                provider.unbindAll()
+                provider.bindToLifecycle(this, CameraSelector.DEFAULT_FRONT_CAMERA, analysis)
+                writeState(camera = "ACTIVE", error = "")
+                updateNotification("Camera ACTIVE • waiting for hand")
+            } catch (t: Throwable) {
+                writeState(camera = "ERROR", error = t.message ?: t.javaClass.simpleName)
+                updateNotification("Camera ERROR")
+            }
         }, ContextCompat.getMainExecutor(this))
     }
 
     private fun analyze(image: ImageProxy) {
-        if (busy.getAndSet(true)) { image.close(); return }
+        if (busy.getAndSet(true)) {
+            image.close()
+            return
+        }
         try {
-            val bitmap = image.toBitmap()
-            val mpImage = BitmapImageBuilder(bitmap).build()
-            landmarker?.detectAsync(mpImage, SystemClock.uptimeMillis())
-        } catch (_: Throwable) {
+            val source = image.toBitmap()
+            val rotation = image.imageInfo.rotationDegrees
+            val matrix = Matrix().apply {
+                postRotate(rotation.toFloat())
+            }
+            val rotated = if (rotation == 0) source else Bitmap.createBitmap(
+                source, 0, 0, source.width, source.height, matrix, true
+            )
+            val mpImage = BitmapImageBuilder(rotated).build()
+            val timestamp = max(SystemClock.uptimeMillis(), previousTime + 1L)
+            previousTime = timestamp
+            landmarker?.detectAsync(mpImage, timestamp)
+            frames++
+            val now = SystemClock.uptimeMillis()
+            if (fpsStart == 0L) fpsStart = now
+            if (now - fpsStart >= 1000L) {
+                fps = frames * 1000f / (now - fpsStart)
+                frames = 0
+                fpsStart = now
+                writeState(fps = fps)
+            }
+            if (rotated !== source) source.recycle()
+        } catch (t: Throwable) {
+            writeState(camera = "ERROR", error = t.message ?: t.javaClass.simpleName)
         } finally {
             busy.set(false)
             image.close()
@@ -90,22 +148,27 @@ class GestureService : LifecycleService() {
     }
 
     private fun onResult(result: HandLandmarkerResult) {
+        val now = SystemClock.uptimeMillis()
         if (result.landmarks().isEmpty()) {
             previousX = null
             previousY = null
             stablePose = GestureClassifier.Pose.NONE
+            writeState(hand = false, pose = "NONE", confidence = 0f)
             return
         }
+
         val raw = result.landmarks()[0].map { LandmarkPoint(it.x(), it.y(), it.z()) }
-        val now = SystemClock.uptimeMillis()
         val dt = max(1L, now - previousTime)
         val r = GestureClassifier.classify(raw, previousX, previousY, dt)
-        previousX = r.x; previousY = r.y; previousTime = now
+        previousX = r.x
+        previousY = r.y
 
         if (r.pose != stablePose) {
             stablePose = r.pose
             stableSince = now
         }
+
+        writeState(hand = true, pose = r.pose.name, confidence = r.confidence)
 
         val action = when {
             r.swipe != GestureClassifier.Swipe.NONE && r.pose == GestureClassifier.Pose.OPEN -> when (r.swipe) {
@@ -121,17 +184,47 @@ class GestureService : LifecycleService() {
             else -> null
         }
 
-        val hold = if (action == GestureAction.TAP) 90 else 140
-        val cooldown = if (action == GestureAction.TAP) 650 else 500
-        if (action != null && r.confidence >= 0.85f && now - stableSince >= hold &&
+        val hold = if (action == GestureAction.TAP) 120 else 180
+        val cooldown = if (action == GestureAction.TAP) 750 else 650
+        val accessibility = GestureAccessibilityService.instance
+        if (action != null && r.confidence >= 0.70f && now - stableSince >= hold &&
             (action != lastAction || now - lastActionTime >= cooldown)) {
             lastAction = action
             lastActionTime = now
-            GestureAccessibilityService.instance?.execute(action, r.tapX, r.tapY)
+            if (accessibility != null) {
+                accessibility.execute(action, r.tapX, r.tapY)
+                writeState(action = action.name, error = "")
+                updateNotification("${r.pose.name} → ${action.name}")
+            } else {
+                writeState(action = "BLOCKED: ACCESSIBILITY OFF", error = "Enable Gesture Control Accessibility")
+                updateNotification("Accessibility OFF")
+            }
         }
     }
 
-    private fun notification(): Notification {
+    private fun writeState(
+        running: Boolean? = null,
+        camera: String? = null,
+        hand: Boolean? = null,
+        pose: String? = null,
+        confidence: Float? = null,
+        fps: Float? = null,
+        action: String? = null,
+        error: String? = null
+    ) {
+        val p = getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+        running?.let { p.putBoolean("running", it) }
+        camera?.let { p.putString("camera", it) }
+        hand?.let { p.putBoolean("hand", it) }
+        pose?.let { p.putString("pose", it) }
+        confidence?.let { p.putFloat("confidence", it) }
+        fps?.let { p.putFloat("fps", it) }
+        action?.let { p.putString("action", it) }
+        error?.let { p.putString("error", it) }
+        p.apply()
+    }
+
+    private fun notification(text: String): Notification {
         val channelId = "gesture_control"
         val nm = getSystemService(NotificationManager::class.java)
         if (Build.VERSION.SDK_INT >= 26) nm.createNotificationChannel(
@@ -139,20 +232,27 @@ class GestureService : LifecycleService() {
         )
         return NotificationCompat.Builder(this, channelId)
             .setSmallIcon(android.R.drawable.ic_menu_camera)
-            .setContentTitle("Gesture Control aktif")
-            .setContentText("Kamera gesture berjalan di latar belakang")
+            .setContentTitle("Gesture Control")
+            .setContentText(text)
             .setOngoing(true)
             .build()
     }
 
+    private fun updateNotification(text: String) {
+        getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, notification(text))
+    }
+
     override fun onDestroy() {
-        landmarker?.close(); landmarker = null
+        writeState(running = false, camera = "STOPPED", hand = false, pose = "NONE")
+        landmarker?.close()
+        landmarker = null
         cameraExecutor.shutdownNow()
         super.onDestroy()
     }
 
     companion object {
         const val NOTIFICATION_ID = 1001
+        const val PREFS = "gesture_runtime"
         fun start(context: Context) = ContextCompat.startForegroundService(context, Intent(context, GestureService::class.java))
         fun stop(context: Context) = context.stopService(Intent(context, GestureService::class.java))
     }
