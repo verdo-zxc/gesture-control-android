@@ -27,7 +27,7 @@ import com.google.mediapipe.tasks.vision.handlandmarker.HandLandmarker
 import com.google.mediapipe.tasks.vision.handlandmarker.HandLandmarkerResult
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
-import kotlin.math.max
+import kotlin.math.abs
 
 class GestureService : LifecycleService() {
     private val cameraExecutor = Executors.newSingleThreadExecutor()
@@ -36,10 +36,14 @@ class GestureService : LifecycleService() {
     private var previousX: Float? = null
     private var previousY: Float? = null
     private var previousResultTime = 0L
-    private var lastAction: GestureAction? = null
+    private var openHandActive = false
+    private var indexPoseActive = false
+    private var peacePoseActive = false
+    private var fistPoseActive = false
+    private var lastIndexFire = 0L
+    private var lastPeaceFire = 0L
+    private var lastFistFire = 0L
     private var lastActionTime = 0L
-    private var stablePose = GestureClassifier.Pose.NONE
-    private var stableSince = 0L
     private var frames = 0
     private var fpsStart = 0L
     private var fps = 0f
@@ -62,7 +66,7 @@ class GestureService : LifecycleService() {
         val base = BaseOptions.builder().setModelAssetPath("hand_landmarker.task").build()
         val options = HandLandmarker.HandLandmarkerOptions.builder()
             .setBaseOptions(base).setRunningMode(RunningMode.LIVE_STREAM).setNumHands(1)
-            .setMinHandDetectionConfidence(0.60f).setMinHandPresenceConfidence(0.60f).setMinTrackingConfidence(0.60f)
+            .setMinHandDetectionConfidence(0.60f).setMinHandPresenceConfidence(0.50f).setMinTrackingConfidence(0.50f)
             .setResultListener { result, _ -> onResult(result) }
             .setErrorListener { error -> writeState(camera = "ERROR", error = error.message ?: "MediaPipe error"); updateNotification("MediaPipe ERROR") }
             .build()
@@ -80,7 +84,7 @@ class GestureService : LifecycleService() {
                 val analysis = ImageAnalysis.Builder()
                     .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                     .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
-                    .setTargetResolution(android.util.Size(640, 480)).build()
+                    .setTargetResolution(android.util.Size(480, 360)).build()
                 analysis.setAnalyzer(cameraExecutor) { image -> analyze(image) }
                 provider.unbindAll()
                 provider.bindToLifecycle(this, CameraSelector.DEFAULT_FRONT_CAMERA, analysis)
@@ -112,7 +116,7 @@ class GestureService : LifecycleService() {
         val now = SystemClock.uptimeMillis()
         if (result.landmarks().isEmpty()) {
             previousX = null; previousY = null; previousResultTime = 0L
-            stablePose = GestureClassifier.Pose.NONE
+            openHandActive = false; indexPoseActive = false; peacePoseActive = false; fistPoseActive = false
             writeState(hand = false, pose = "NONE", confidence = 0f)
             return
         }
@@ -121,41 +125,73 @@ class GestureService : LifecycleService() {
         previousResultTime = now
         val r = GestureClassifier.classify(raw, previousX, previousY, dt)
         previousX = r.x; previousY = r.y
-
-        if (r.pose != stablePose) { stablePose = r.pose; stableSince = now }
         writeState(hand = true, pose = r.pose.name, confidence = r.confidence)
 
-        val action = when {
-            r.swipe != GestureClassifier.Swipe.NONE && r.pose == GestureClassifier.Pose.OPEN -> when (r.swipe) {
-                GestureClassifier.Swipe.LEFT -> GestureAction.SWIPE_LEFT
-                GestureClassifier.Swipe.RIGHT -> GestureAction.SWIPE_RIGHT
-                GestureClassifier.Swipe.UP -> GestureAction.SCROLL_UP
-                GestureClassifier.Swipe.DOWN -> GestureAction.SCROLL_DOWN
-                else -> null
+        // Match the Macaly demo's edge-triggered static gestures and 600 ms re-fire windows.
+        if (r.pose == GestureClassifier.Pose.VICTORY) {
+            if (!peacePoseActive && now - lastPeaceFire > 600L) {
+                fire(GestureAction.TAP, r.tapX, r.tapY, "TAP / OK (2 jari ✌️)")
+                lastPeaceFire = now
             }
-            r.pose == GestureClassifier.Pose.VICTORY -> GestureAction.TAP
-            r.pose == GestureClassifier.Pose.POINT -> GestureAction.HOME
-            r.pose == GestureClassifier.Pose.FIST -> GestureAction.RECENT
-            else -> null
-        }
+            peacePoseActive = true
+        } else peacePoseActive = false
 
-        // Require a stable pose before acting. A pose change also resets the cooldown,
-        // preventing a shaky hand from generating repeated actions.
-        val hold = if (action == GestureAction.TAP) 260L else 320L
-        val cooldown = if (action == GestureAction.TAP) 900L else 800L
-        val accessibility = GestureAccessibilityService.instance
-        if (action != null && r.confidence >= 0.78f && now - stableSince >= hold &&
-            (action != lastAction || now - lastActionTime >= cooldown)) {
-            lastAction = action; lastActionTime = now
-            if (accessibility != null) {
-                accessibility.execute(action, r.tapX, r.tapY)
-                writeState(action = action.name, error = "")
-                updateNotification("${r.pose.name} → ${action.name}")
-            } else {
-                writeState(action = "BLOCKED: ACCESSIBILITY OFF", error = "Enable Gesture Control Accessibility")
-                updateNotification("Accessibility OFF")
+        if (r.pose == GestureClassifier.Pose.FIST) {
+            if (!fistPoseActive && now - lastFistFire > 600L) {
+                fire(GestureAction.RECENT, r.tapX, r.tapY, "RECENT APPS (kepalan ✊)")
+                lastFistFire = now
             }
+            fistPoseActive = true
+        } else fistPoseActive = false
+
+        if (r.pose == GestureClassifier.Pose.POINT) {
+            if (!indexPoseActive && now - lastIndexFire > 600L) {
+                fire(GestureAction.HOME, r.tapX, r.tapY, "HOME (telunjuk ☝️)")
+                lastIndexFire = now
+            }
+            indexPoseActive = true
+        } else indexPoseActive = false
+
+        // Match Macaly's open-palm 220 ms motion window.
+        if (r.pose == GestureClassifier.Pose.OPEN) {
+            if (!openHandActive) {
+                openHandActive = true
+                previousX = r.x; previousY = r.y
+            } else if (r.swipe != GestureClassifier.Swipe.NONE && now - lastActionTime > 450L) {
+                val action = when (r.swipe) {
+                    GestureClassifier.Swipe.LEFT -> GestureAction.SWIPE_LEFT
+                    GestureClassifier.Swipe.RIGHT -> GestureAction.SWIPE_RIGHT
+                    GestureClassifier.Swipe.UP -> GestureAction.SCROLL_UP
+                    GestureClassifier.Swipe.DOWN -> GestureAction.SCROLL_DOWN
+                    GestureClassifier.Swipe.NONE -> null
+                }
+                if (action != null) {
+                    fire(action, r.tapX, r.tapY, actionLabel(action))
+                    lastActionTime = now
+                    previousX = r.x; previousY = r.y
+                }
+            }
+        } else openHandActive = false
+    }
+
+    private fun fire(action: GestureAction, x: Float, y: Float, message: String) {
+        val accessibility = GestureAccessibilityService.instance
+        if (accessibility != null) {
+            accessibility.execute(action, x, y)
+            writeState(action = action.name, error = "")
+            updateNotification(message)
+        } else {
+            writeState(action = "BLOCKED: ACCESSIBILITY OFF", error = "Enable Gesture Control Accessibility")
+            updateNotification("Accessibility OFF")
         }
+    }
+
+    private fun actionLabel(action: GestureAction) = when (action) {
+        GestureAction.SWIPE_LEFT -> "GESER LAYAR kanan→kiri"
+        GestureAction.SWIPE_RIGHT -> "BACK (swipe kiri→kanan)"
+        GestureAction.SCROLL_UP -> "SCROLL ke atas"
+        GestureAction.SCROLL_DOWN -> "SCROLL ke bawah"
+        else -> action.name
     }
 
     private fun writeState(running: Boolean? = null, camera: String? = null, hand: Boolean? = null, pose: String? = null,
@@ -190,3 +226,5 @@ class GestureService : LifecycleService() {
         fun stop(context: Context) = context.stopService(Intent(context, GestureService::class.java))
     }
 }
+
+enum class GestureAction { TAP, HOME, RECENT, SWIPE_LEFT, SWIPE_RIGHT, BACK, SCROLL_UP, SCROLL_DOWN }
