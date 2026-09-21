@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">Gesture Control</string>
+    <string name="accessibility_description">Performs Home, Recent, Back, tap, swipe and scroll actions from hand gestures.</string>
+</resources>
