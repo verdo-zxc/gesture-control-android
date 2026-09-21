@@ -7,25 +7,25 @@ import android.app.NotificationManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.graphics.ImageFormat
+import android.graphics.Bitmap
+import android.graphics.Matrix
 import android.os.Build
 import android.os.SystemClock
 import androidx.camera.camera2.interop.Camera2Interop
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
-import androidx.camera.core.Preview
 import androidx.camera.lifecycle.LifecycleService
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.app.ActivityCompat
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
-import com.google.mediapipe.framework.image.MediaImageBuilder
+import com.google.mediapipe.framework.image.BitmapImageBuilder
 import com.google.mediapipe.tasks.core.BaseOptions
 import com.google.mediapipe.tasks.vision.core.RunningMode
 import com.google.mediapipe.tasks.vision.handlandmarker.HandLandmarker
-import com.google.mediapipe.tasks.vision.handlandmarker.HandLandmarkerResult
 import com.google.mediapipe.tasks.vision.handlandmarker.HandLandmarkerOptions
+import com.google.mediapipe.tasks.vision.handlandmarker.HandLandmarkerResult
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.max
@@ -37,9 +37,9 @@ class GestureService : LifecycleService() {
     private var previousX: Float? = null
     private var previousY: Float? = null
     private var previousTime = 0L
-    private var lastAction = GestureAction.TAP
+    private var lastAction: GestureAction? = null
     private var lastActionTime = 0L
-    private var stablePose: GestureClassifier.Pose = GestureClassifier.Pose.NONE
+    private var stablePose = GestureClassifier.Pose.NONE
     private var stableSince = 0L
 
     override fun onCreate() {
@@ -71,10 +71,13 @@ class GestureService : LifecycleService() {
             val provider = future.get()
             val analysis = ImageAnalysis.Builder()
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
+                .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
                 .setTargetResolution(android.util.Size(640, 480))
                 .build()
-            Camera2Interop.Extender(analysis).setCaptureRequestOption(android.hardware.camera2.CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, android.util.Range(30, 30))
+            Camera2Interop.Extender(analysis).setCaptureRequestOption(
+                android.hardware.camera2.CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE,
+                android.util.Range(30, 30)
+            )
             analysis.setAnalyzer(cameraExecutor) { image -> analyze(image) }
             provider.unbindAll()
             provider.bindToLifecycle(this, CameraSelector.DEFAULT_FRONT_CAMERA, analysis)
@@ -84,11 +87,16 @@ class GestureService : LifecycleService() {
     private fun analyze(image: ImageProxy) {
         if (busy.getAndSet(true)) { image.close(); return }
         try {
-            if (image.format != ImageFormat.YUV_420_888) return
-            val mediaImage = image.image ?: return
-            val mpImage = MediaImageBuilder(mediaImage).build()
-            val timestamp = SystemClock.uptimeMillis()
-            landmarker?.detectAsync(mpImage, timestamp)
+            val source = image.toBitmap()
+            val rotation = image.imageInfo.rotationDegrees
+            val rotated = if (rotation == 0) source else {
+                val matrix = Matrix().apply { postRotate(rotation.toFloat()) }
+                Bitmap.createBitmap(source, 0, 0, source.width, source.height, matrix, true)
+            }
+            val mpImage = BitmapImageBuilder(rotated).build()
+            landmarker?.detectAsync(mpImage, SystemClock.uptimeMillis())
+            if (rotated !== source) source.recycle()
+            rotated.recycle()
         } catch (_: Throwable) {
         } finally {
             busy.set(false)
@@ -98,7 +106,9 @@ class GestureService : LifecycleService() {
 
     private fun onResult(result: HandLandmarkerResult) {
         if (result.landmarks().isEmpty()) {
-            previousX = null; previousY = null; stablePose = GestureClassifier.Pose.NONE
+            previousX = null
+            previousY = null
+            stablePose = GestureClassifier.Pose.NONE
             return
         }
         val raw = result.landmarks()[0].map { LandmarkPoint(it.x(), it.y(), it.z()) }
@@ -126,20 +136,22 @@ class GestureService : LifecycleService() {
             else -> null
         }
 
-        if (action != null && r.confidence >= 0.85f && now - stableSince >= if (action == GestureAction.TAP) 90 else 140) {
-            val cooldown = if (action == GestureAction.TAP) 650 else 500
-            if (action != lastAction || now - lastActionTime >= cooldown) {
-                lastAction = action
-                lastActionTime = now
-                GestureAccessibilityService.instance?.execute(action)
-            }
+        val hold = if (action == GestureAction.TAP) 90 else 140
+        val cooldown = if (action == GestureAction.TAP) 650 else 500
+        if (action != null && r.confidence >= 0.85f && now - stableSince >= hold &&
+            (action != lastAction || now - lastActionTime >= cooldown)) {
+            lastAction = action
+            lastActionTime = now
+            GestureAccessibilityService.instance?.execute(action)
         }
     }
 
     private fun notification(): Notification {
         val channelId = "gesture_control"
         val nm = getSystemService(NotificationManager::class.java)
-        if (Build.VERSION.SDK_INT >= 26) nm.createNotificationChannel(NotificationChannel(channelId, "Gesture Control", NotificationManager.IMPORTANCE_LOW))
+        if (Build.VERSION.SDK_INT >= 26) nm.createNotificationChannel(
+            NotificationChannel(channelId, "Gesture Control", NotificationManager.IMPORTANCE_LOW)
+        )
         return NotificationCompat.Builder(this, channelId)
             .setSmallIcon(android.R.drawable.ic_menu_camera)
             .setContentTitle("Gesture Control aktif")
@@ -156,10 +168,7 @@ class GestureService : LifecycleService() {
 
     companion object {
         const val NOTIFICATION_ID = 1001
-        fun start(context: Context) {
-            val intent = Intent(context, GestureService::class.java)
-            ContextCompat.startForegroundService(context, intent)
-        }
-        fun stop(context: Context) { context.stopService(Intent(context, GestureService::class.java)) }
+        fun start(context: Context) = ContextCompat.startForegroundService(context, Intent(context, GestureService::class.java))
+        fun stop(context: Context) = context.stopService(Intent(context, GestureService::class.java))
     }
 }
