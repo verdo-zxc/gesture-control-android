@@ -13,11 +13,17 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
+      - name: Download MediaPipe hand model
+        run: |
+          mkdir -p app/src/main/assets
+          curl -L --fail --retry 3 -o app/src/main/assets/hand_landmarker.task \
+            https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task
+          test -s app/src/main/assets/hand_landmarker.task
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
       - name: Build debug APK
-        run: gradle :app:assembleDebug --no-daemon
+        run: gradle :app:assembleDebug --no-daemon --stacktrace
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
