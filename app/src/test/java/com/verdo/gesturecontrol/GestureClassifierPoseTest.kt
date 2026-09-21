@@ -17,7 +17,8 @@ class GestureClassifierPoseTest {
 
         fun setFinger(pip: Int, tip: Int, extended: Boolean) {
             points[pip] = LandmarkPoint(0f, 1f, 0f)
-            points[tip] = LandmarkPoint(0f, if (extended) 1.6f else 0.75f, 0f)
+            // MediaPipe y grows downward. Macaly's rule is TIP.y < PIP.y - 0.02.
+            points[tip] = LandmarkPoint(0f, if (extended) 0.20f else 1.20f, 0f)
         }
 
         setFinger(6, 8, indexExtended)
