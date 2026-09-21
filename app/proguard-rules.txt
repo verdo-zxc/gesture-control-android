@@ -1,0 +1,1 @@
+# Project-specific R8 rules. MediaPipe and AndroidX keep their required metadata.
