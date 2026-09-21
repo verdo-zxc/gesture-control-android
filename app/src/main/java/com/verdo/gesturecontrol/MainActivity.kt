@@ -10,17 +10,29 @@ import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.activity.ComponentActivity
-import androidx.core.app.ActivityCompat
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
 
 class MainActivity : ComponentActivity() {
-    private val cameraRequest = 42
-    private val notificationRequest = 43
+    private lateinit var status: TextView
+
+    private val permissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { result ->
+        val cameraGranted = result[Manifest.permission.CAMERA] == true ||
+            ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
+        if (cameraGranted) {
+            status.text = "Kamera diizinkan. Pastikan Accessibility Service aktif."
+            requestNotificationsIfNeeded()
+        } else {
+            status.text = "Izin kamera ditolak."
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        val status = TextView(this).apply {
+        status = TextView(this).apply {
             textSize = 18f
             text = "Gesture Control\n\n1. Izinkan kamera\n2. Aktifkan Accessibility Service\n3. Tekan Start"
         }
@@ -31,7 +43,7 @@ class MainActivity : ComponentActivity() {
             addView(status)
             addView(Button(context).apply {
                 text = "Izinkan Kamera"
-                setOnClickListener { requestCamera() }
+                setOnClickListener { requestPermissionsIfNeeded() }
             })
             addView(Button(context).apply {
                 text = "Buka Accessibility"
@@ -40,13 +52,11 @@ class MainActivity : ComponentActivity() {
             addView(Button(context).apply {
                 text = "START GESTURE"
                 setOnClickListener {
-                    if (ContextCompat.checkSelfPermission(
-                            this@MainActivity,
-                            Manifest.permission.CAMERA
-                        ) != PackageManager.PERMISSION_GRANTED
+                    if (ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.CAMERA)
+                        != PackageManager.PERMISSION_GRANTED
                     ) {
                         status.text = "Kamera belum diizinkan."
-                        requestCamera()
+                        requestPermissionsIfNeeded()
                         return@setOnClickListener
                     }
                     GestureService.start(this@MainActivity)
@@ -61,47 +71,31 @@ class MainActivity : ComponentActivity() {
                 }
             })
         }
-
         setContentView(layout)
     }
 
-    private fun requestCamera() {
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
-            != PackageManager.PERMISSION_GRANTED
-        ) {
-            ActivityCompat.requestPermissions(
-                this,
-                arrayOf(Manifest.permission.CAMERA),
-                cameraRequest
-            )
-            return
+    private fun requestPermissionsIfNeeded() {
+        val permissions = mutableListOf<String>()
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+            permissions += Manifest.permission.CAMERA
         }
-        requestNotifications()
-    }
-
-    private fun requestNotifications() {
         if (Build.VERSION.SDK_INT >= 33 &&
-            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
-            != PackageManager.PERMISSION_GRANTED
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
         ) {
-            ActivityCompat.requestPermissions(
-                this,
-                arrayOf(Manifest.permission.POST_NOTIFICATIONS),
-                notificationRequest
-            )
+            permissions += Manifest.permission.POST_NOTIFICATIONS
+        }
+        if (permissions.isEmpty()) {
+            status.text = "Semua izin sudah aktif."
+        } else {
+            permissionLauncher.launch(permissions.toTypedArray())
         }
     }
 
-    override fun onRequestPermissionsResult(
-        requestCode: Int,
-        permissions: Array<out String>,
-        grantResults: IntArray
-    ) {
-        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (requestCode == cameraRequest &&
-            grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED
+    private fun requestNotificationsIfNeeded() {
+        if (Build.VERSION.SDK_INT >= 33 &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
         ) {
-            requestNotifications()
+            permissionLauncher.launch(arrayOf(Manifest.permission.POST_NOTIFICATIONS))
         }
     }
 }
