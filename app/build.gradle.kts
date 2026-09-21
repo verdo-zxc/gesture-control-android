@@ -10,9 +10,13 @@ android {
     defaultConfig {
         applicationId = "com.verdo.gesturecontrol"
         minSdk = 26
-        targetSdk = 36
-        versionCode = 1
-        versionName = "0.1.0"
+        // AccessibilityService sideload restriction on Android 13+ is triggered
+        // for apps targeting API 33+. Keep this sideload/debug build at API 32
+        // so the user can enable the service normally without the restricted-
+        // settings gate. We still compile against the current SDK.
+        targetSdk = 32
+        versionCode = 2
+        versionName = "0.2.0"
     }
 
     buildTypes {
