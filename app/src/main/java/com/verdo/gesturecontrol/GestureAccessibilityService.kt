@@ -27,12 +27,12 @@ class GestureAccessibilityService : AccessibilityService() {
         super.onDestroy()
     }
 
-    fun execute(action: GestureAction) {
+    fun execute(action: GestureAction, nx: Float = 0.5f, ny: Float = 0.5f) {
         when (action) {
             GestureAction.HOME -> performGlobalAction(GLOBAL_ACTION_HOME)
             GestureAction.RECENT -> performGlobalAction(GLOBAL_ACTION_RECENTS)
             GestureAction.BACK -> performGlobalAction(GLOBAL_ACTION_BACK)
-            GestureAction.TAP -> tap(0.5f, 0.5f)
+            GestureAction.TAP -> tap(1f - nx, ny)
             GestureAction.SWIPE_LEFT -> swipe(0.80f, 0.50f, 0.20f, 0.50f, 180)
             GestureAction.SWIPE_RIGHT -> swipe(0.20f, 0.50f, 0.80f, 0.50f, 180)
             GestureAction.SCROLL_UP -> swipe(0.50f, 0.72f, 0.50f, 0.28f, 220)
