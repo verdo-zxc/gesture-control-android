@@ -7,8 +7,6 @@ import android.app.NotificationManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.graphics.Bitmap
-import android.graphics.Matrix
 import android.os.Build
 import android.os.SystemClock
 import androidx.camera.core.CameraSelector
@@ -81,16 +79,9 @@ class GestureService : LifecycleService() {
     private fun analyze(image: ImageProxy) {
         if (busy.getAndSet(true)) { image.close(); return }
         try {
-            val source = image.toBitmap()
-            val rotation = image.imageInfo.rotationDegrees
-            val rotated = if (rotation == 0) source else {
-                val matrix = Matrix().apply { postRotate(rotation.toFloat()) }
-                Bitmap.createBitmap(source, 0, 0, source.width, source.height, matrix, true)
-            }
-            val mpImage = BitmapImageBuilder(rotated).build()
+            val bitmap = image.toBitmap()
+            val mpImage = BitmapImageBuilder(bitmap).build()
             landmarker?.detectAsync(mpImage, SystemClock.uptimeMillis())
-            if (rotated !== source) source.recycle()
-            rotated.recycle()
         } catch (_: Throwable) {
         } finally {
             busy.set(false)
