@@ -127,7 +127,7 @@ class GestureService : LifecycleService() {
             (action != lastAction || now - lastActionTime >= cooldown)) {
             lastAction = action
             lastActionTime = now
-            GestureAccessibilityService.instance?.execute(action)
+            GestureAccessibilityService.instance?.execute(action, r.tapX, r.tapY)
         }
     }
 
