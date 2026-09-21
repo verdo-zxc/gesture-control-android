@@ -57,5 +57,3 @@ class GestureAccessibilityService : AccessibilityService() {
         dispatchGesture(gesture, null, mainHandler)
     }
 }
-
-enum class GestureAction { TAP, HOME, RECENT, SWIPE_LEFT, SWIPE_RIGHT, BACK, SCROLL_UP, SCROLL_DOWN }
